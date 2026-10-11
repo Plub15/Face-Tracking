@@ -5,6 +5,5 @@ models/*.part
 references/
 test_artifacts/
 
-references/*
 
 .vscode/
