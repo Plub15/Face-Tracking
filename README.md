@@ -54,9 +54,9 @@ whose cosine similarity to their original is below 0.363 are discarded.
 Settings are configurable:
 
 ```powershell
-python collect_reference.py -u plub --prepare-only --augmentation-angles -30 -15 15 30 --augmentation-lighting 0.65 1.35 --augmentation-gamma 0.7 1.4
-python face_tracker.py --reference-dir references/plub --source 0
-python face_tracker.py --reference-dir references/plub --no-augment-references
+python collect_reference.py -u alice --prepare-only --augmentation-angles -30 -15 15 30 --augmentation-lighting 0.65 1.35 --augmentation-gamma 0.7 1.4
+python face_tracker.py --reference-dir references/alice --source 0
+python face_tracker.py --reference-dir references/alice --no-augment-references
 ```
 
 An augmentation option with no values disables that variant group. Duplicate
@@ -68,9 +68,9 @@ Tracking stays offline and the gallery remains fixed during a run.
 For older or manually managed reference folders, prepare once without collecting:
 
 ```powershell
-python collect_reference.py -u plub --prepare-only
+python collect_reference.py -u alice --prepare-only
 # Also supports reference folders outside the collector's references directory:
-python face_tracker.py --reference-dir references/plub --prepare-references
+python face_tracker.py --reference-dir references/alice --prepare-references
 ```
 
 `--prepare-references` exits without opening a camera. `--cache-path PATH` overrides
@@ -236,7 +236,7 @@ of an incorrect match. Use `--tracking-threshold 0.5` for the original strict cu
 If a head turn loses the box, run with diagnostics:
 
 ```powershell
-python face_tracker.py --reference-dir references/plub --source 0 --diagnostics
+python face_tracker.py --reference-dir references/alice --source 0 --diagnostics
 ```
 
 The preview shows the rejection reason and active cutoff. Per-frame diagnostics
