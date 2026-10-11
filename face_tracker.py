@@ -53,11 +53,9 @@ def verify_model(path: Path, model: ModelFile) -> None:
         raise ValueError(f"Missing model: {path}. Run with --download-models first.")
     if path.stat().st_size != model.size:
         raise ValueError(f"Invalid model size: {path}. Run --download-models to repair it.")
-    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    if digest.hexdigest() != model.sha256:
+        checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+    if checksum != model.sha256:
         raise ValueError(f"Model checksum mismatch: {path}. Run --download-models to repair it.")
 
 
@@ -235,7 +233,8 @@ def read_image(path: Path) -> np.ndarray:
     return image
 
 
-def collect_references(paths: Sequence[str] | None, directory: str | None) -> list[Path]:
+def collect_references(paths: Sequence[str] | None, directory: str | Path | None,
+                       *, allow_empty: bool = False) -> list[Path]:
     if directory is not None:
         folder = Path(directory)
         if not folder.is_dir():
@@ -246,7 +245,7 @@ def collect_references(paths: Sequence[str] | None, directory: str | None) -> li
         )
     else:
         result = [Path(path) for path in paths or []]
-    if not result:
+    if not result and not allow_empty:
         raise ValueError("Provide at least one reference using --references or --reference-dir.")
     return result
 
@@ -371,6 +370,44 @@ def augmentation_from_args(args) -> ReferenceAugmentation:
     return config
 
 
+def enroll_references(detector, recognizer, references: Sequence[str | Path],
+                      augmentation: ReferenceAugmentation | None = None):
+    """Build a fixed gallery; collection omits augmentation until preparation."""
+    if not references:
+        raise ValueError("Provide at least one reference image.")
+    config = ReferenceAugmentation(enabled=False) if augmentation is None else augmentation
+    config.validate()
+    gallery, variants = [], []
+    skipped = 0
+    for reference in references:
+        path = Path(reference)
+        image = read_image(path)
+        faces = detect_faces(detector, image)
+        if len(faces) != 1:
+            raise ValueError(f"Reference {path}: expected exactly one detectable face, found {len(faces)}.")
+        try:
+            original = face_embedding(recognizer, image, faces[0])
+            gallery.append(original)
+            variants.append({"file": str(path), "variant": "original"})
+            for label, augmented, face in reference_variants(image, faces[0], config, detector):
+                try:
+                    feature = face_embedding(recognizer, augmented, face)
+                except (ValueError, cv2.error):
+                    skipped += 1
+                    continue
+                # Known transforms can still degrade recognition; exclude poor matches.
+                if float(feature @ original) < 0.363:
+                    skipped += 1
+                    continue
+                gallery.append(feature)
+                variants.append({"file": str(path), "variant": label})
+        except (ValueError, cv2.error) as error:
+            raise ValueError(f"Cannot enroll reference {path}: {error}") from error
+    embeddings = np.stack(gallery)
+    embeddings.setflags(write=False)
+    return embeddings, variants, skipped
+
+
 def gallery_cache_path(references: Sequence[str | Path], cache_path: str | Path | None = None) -> Path:
     return Path(cache_path) if cache_path is not None else Path(references[0]).resolve().parent / GALLERY_CACHE_NAME
 
@@ -379,12 +416,10 @@ def reference_fingerprints(references: Sequence[str | Path], cache_path: Path) -
     result = []
     for reference in references:
         path = Path(reference).resolve()
-        digest = hashlib.sha256()
         with path.open("rb") as stream:
-            for block in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(block)
+            checksum = hashlib.file_digest(stream, "sha256").hexdigest()
         result.append({"file": Path(os.path.relpath(path, cache_path.resolve().parent)).as_posix(),
-                       "sha256": digest.hexdigest()})
+                       "sha256": checksum})
     return sorted(result, key=lambda item: item["file"])
 
 
@@ -433,22 +468,25 @@ def prepare_gallery_cache(references: Sequence[str | Path], model_dir: str | Pat
     destination = gallery_cache_path(references, cache_path)
     sources = reference_fingerprints(references, destination)
     print(f"Preparing {len(references)} reference photos ...", file=sys.stderr)
-    tracker = FaceTracker(references, model_dir, detection_threshold, augmentation=augmentation, use_cache=False)
+    augmentation = ReferenceAugmentation() if augmentation is None else augmentation
+    augmentation.validate()
+    detector, recognizer = create_face_models(model_dir, detection_threshold)
+    embeddings, variants, skipped = enroll_references(detector, recognizer, references, augmentation)
     if sources != reference_fingerprints(references, destination):
         raise ValueError("Reference photos changed during preparation; please retry.")
     metadata = {
         "version": GALLERY_CACHE_VERSION, "models": [asdict(model) for model in MODEL_FILES],
-        "sources": sources, "augmentation": asdict(tracker.augmentation),
+        "sources": sources, "augmentation": asdict(augmentation),
         "detection_threshold": detection_threshold, "opencv": cv2.__version__,
-        "skipped_augmentations": tracker.skipped_augmentations,
+        "skipped_augmentations": skipped,
         "variants": [{"file": Path(os.path.relpath(Path(item["file"]).resolve(), destination.resolve().parent)).as_posix(),
-                      "variant": item["variant"]} for item in tracker.reference_variants],
+                      "variant": item["variant"]} for item in variants],
     }
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(dir=destination.parent, suffix=".part", delete=False) as stream:
             temporary = Path(stream.name)
-            np.savez_compressed(stream, embeddings=tracker.reference_embeddings,
+            np.savez_compressed(stream, embeddings=embeddings,
                                 metadata=np.array(json.dumps(metadata, allow_nan=False)))
             stream.flush()
             os.fsync(stream.fileno())
@@ -456,8 +494,8 @@ def prepare_gallery_cache(references: Sequence[str | Path], model_dir: str | Pat
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    print(f"Prepared {destination}: {len(tracker.reference_embeddings)} embeddings "
-          f"({tracker.skipped_augmentations} degraded variants skipped).", file=sys.stderr)
+    print(f"Prepared {destination}: {len(embeddings)} embeddings "
+          f"({skipped} degraded variants skipped).", file=sys.stderr)
     return destination
 
 
@@ -498,48 +536,13 @@ class FaceTracker:
         self.last_bbox = self.last_frame_size = self.last_verified_time = None
         self.last_diagnostics = {}
         self.reference_count = len(references)
-        self.reference_variants = []
-        self.skipped_augmentations = 0
-        self.cache_loaded = False
+        self.cache_loaded = use_cache
         if use_cache:
             self.reference_embeddings, self.reference_variants, self.skipped_augmentations, self.augmentation = load_gallery_cache(
                 references, gallery_cache_path(references, cache_path), augmentation)
-            self.cache_loaded = True
-            return
-        gallery = []
-        for reference in references:
-            path = Path(reference)
-            image = read_image(path)
-            faces = self._detect(image)
-            if len(faces) != 1:
-                raise ValueError(f"Reference {path}: expected exactly one detectable face, found {len(faces)}.")
-            try:
-                original = self._feature(image, faces[0])
-                gallery.append(original)
-                self.reference_variants.append({"file": str(path), "variant": "original"})
-                for label, augmented, augmented_face in reference_variants(image, faces[0], self.augmentation, self.detector):
-                    try:
-                        feature = self._feature(augmented, augmented_face)
-                    except (ValueError, cv2.error):
-                        self.skipped_augmentations += 1
-                        continue
-                    # Do not enroll heavily degraded variants that no longer
-                    # resemble their own original, even though the transform is known.
-                    if float(feature @ original) < 0.363:
-                        self.skipped_augmentations += 1
-                        continue
-                    gallery.append(feature)
-                    self.reference_variants.append({"file": str(path), "variant": label})
-            except (ValueError, cv2.error) as error:
-                raise ValueError(f"Cannot enroll reference {path}: {error}") from error
-        self.reference_embeddings = np.stack(gallery)
-        self.reference_embeddings.setflags(write=False)
-
-    def _detect(self, frame: np.ndarray) -> np.ndarray:
-        return detect_faces(self.detector, frame)
-
-    def _feature(self, frame: np.ndarray, face: np.ndarray) -> np.ndarray:
-        return face_embedding(self.recognizer, frame, face)
+        else:
+            self.reference_embeddings, self.reference_variants, self.skipped_augmentations = enroll_references(
+                self.detector, self.recognizer, references, self.augmentation)
 
     def process(self, frame: np.ndarray) -> TrackingResult:
         if (not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] != 3
@@ -547,8 +550,8 @@ class FaceTracker:
             raise ValueError("frame must be a nonempty BGR uint8 image of shape (height, width, 3).")
         timestamp = time.monotonic()
         frame_size = (frame.shape[1], frame.shape[0])
-        faces = self._detect(frame)
-        features = np.stack([self._feature(frame, face) for face in faces]) if len(faces) else np.empty((0, 0))
+        faces = detect_faces(self.detector, frame)
+        features = np.stack([face_embedding(self.recognizer, frame, face) for face in faces]) if len(faces) else np.empty((0, 0))
         scores = reference_scores(features, self.reference_embeddings)
         boxes = [clip_bbox(face, frame_size) for face in faces]
         continuing = False

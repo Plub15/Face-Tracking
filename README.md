@@ -7,7 +7,7 @@ is verified. This first version provides position data for future camera control
 
 ## Run in your Conda `iot` environment
 
-From PowerShell in `D:\University_Works\Face-Tracking`:
+Use Python 3.11 or newer. From PowerShell in `D:\University_Works\Face-Tracking`:
 
 ```powershell
 conda activate iot
@@ -117,10 +117,10 @@ python collect_reference.py --download-models
 ```
 
 If you installed the older `opencv-python` requirements, uninstall that package
-before installing the collector requirements. Use a single OpenCV distribution:
+before installing `requirements.txt`. Use a single OpenCV distribution:
 `opencv-contrib-python` 4.x. The environment used for development has already been
-migrated. `requirements-collector.txt` remains a compatibility alias for the same
-requirements; no additional collector packages or model bundles are needed.
+migrated. Tracker and collector share `requirements.txt`; no additional collector
+packages or model bundles are needed.
 
 ```powershell
 python collect_reference.py -n alice
@@ -147,8 +147,10 @@ python face_tracker.py --reference-dir references/alice --source 0 --json
   alias for `--photos-per-direction`.
 - The first frontal photo establishes the pose baseline and, for a fresh folder,
   the fixed identity anchor. Update sessions validate all existing photos and use
-  their fixed gallery. Later captures must reach cosine similarity 0.5; newly
-  captured photos do not expand the session's identity gallery.
+  their fixed gallery. Later captures must reach the configured similarity
+  threshold, and newly captured photos do not expand the session's identity gallery.
+  The collector CLI's current default is 0.3; use `--similarity-threshold 0.5`
+  for stricter matching.
 - The dashboard shows the detected face, instructions, approximate angles,
   quality feedback, hold progress, and completed categories.
   Its display size is independent of the 320×240 requested camera resolution.
@@ -179,7 +181,7 @@ Default acceptance checks:
 | Sharpness | Laplacian variance ≥50 on the face resized to 128×128 |
 | Front head pose | Within ±10° yaw/pitch of the frontal baseline |
 | Left / right | 20–35° yaw, pitch within ±10° |
-| Up / down | 12–25° pitch, yaw within ±10° |
+| Up / down | Up: −25° to −8° pitch; down: 12–25°; yaw within ±10° |
 | Roll | Within ±15° |
 
 Initial frontal calibration permits ±15° yaw/pitch before the baseline exists.
@@ -317,44 +319,22 @@ in-memory experiments, `FaceTracker(paths, use_cache=False)` computes enrollment
 conda run --no-capture-output -n iot python -m unittest discover -s tests -v
 ```
 
-Tests cover reference selection, enrollment errors, ambiguity, confirmation,
-immediate loss, reacquisition, changing face order, letterboxing, landmark mapping,
-clipping, checksum/atomic download behavior, JSON output, and capture cleanup.
-Tracking tests also cover angle-related score dips, strict reacquisition after
-loss/jumps, expired continuation, resolution changes, ambiguity, and diagnostics.
-Augmentation tests cover brightness/gamma changes, landmark geometry, source
-preservation, disabled/duplicate transforms, fixed gallery enrollment, rejected
-degraded variants, and invalid settings.
-Cache tests cover startup without reference inference, changed/missing sources,
-invalid/corrupt data, model/settings changes, folder relocation, atomic write
-failures, and source edits during preparation.
-Collector tests additionally cover folder rules, pose estimation and thresholds,
-quality rejection, hold resets, fixed identity anchors, all five stages,
-append behavior, incomplete sessions, write failures, and cleanup.
+Regression tests cover shared enrollment, multiple-reference scoring, invalid
+references, degraded augmentation rejection, cache-only startup, changed photos,
+atomic cache write failures, confirmation, ambiguity, continuation, loss and
+reacquisition, coordinate mapping, folder rules, parser defaults, hold resets,
+pose boundaries, and append/cancellation behavior.
 
-For a repeatable real-model smoke test using OpenCV's public sample images:
+Run the offline real-model smoke check with a prepared reference folder:
 
 ```powershell
-conda run --no-capture-output -n iot python -m tests.smoke_models --download-fixtures
+conda run --no-capture-output -n iot python -m tests.smoke_models --reference-dir references/alice
 ```
 
-The smoke test downloads fixtures explicitly into ignored `test_artifacts/`;
-subsequent runs can omit `--download-fixtures`. It tests enrollment from two lighting
-variants, real detections at 320×240 and other aspect ratios, a different person,
-loss/reacquisition, and the CLI on a generated video.
-
-For the collector's real-model smoke test:
-
-```powershell
-conda run --no-capture-output -n iot python -m tests.smoke_collection --download-fixtures
-```
-
-This explicitly downloads Google's portrait test fixture on the first run;
-subsequent runs can omit `--download-fixtures`. It checks both models,
-identity rejection, automatic frontal capture in new/update video sessions,
-preservation of existing images, partial-session manifests, and enrollment of
-the saved JPEGs into the tracker. The full five-stage flow uses synthetic
-pose observations in unit tests. Live five-pose coverage
+It checks existing-cache compatibility, temporary gallery preparation, identity
+matching, loss/reacquisition, collector enrollment, and tracking a generated video
+with JSON output. Temporary files are removed; source photos and the existing
+gallery remain unchanged. Models must already be downloaded. Live pose coverage
 still needs validation with a webcam or a representative guided recording.
 
 For your own references, record clips containing two people crossing, the target

@@ -86,10 +86,6 @@ def resolve_destination(name: str, update: bool, root: Path | None = None) -> Pa
     return destination
 
 
-def download_collection_models(model_dir: Path) -> None:
-    ft.download_models(model_dir)
-
-
 @dataclass(frozen=True)
 class Pose:
     # Positive yaw turns toward the subject's LEFT; positive pitch looks DOWN.
@@ -175,19 +171,8 @@ class FaceAnalyzer:
         self.gallery = None
         self.last_faces = np.empty((0, 15), dtype=np.float32)
         self.detector, self.recognizer = ft.create_face_models(model_dir, config.detection_threshold)
-        gallery = []
-        for path in references:
-            image = ft.read_image(path)
-            faces = ft.detect_faces(self.detector, image)
-            if len(faces) != 1:
-                raise ValueError(f"Reference {path}: expected exactly one detectable face, found {len(faces)}.")
-            try:
-                gallery.append(ft.face_embedding(self.recognizer, image, faces[0]))
-            except (ValueError, cv2.error) as error:
-                raise ValueError(f"Cannot enroll reference {path}: {error}") from error
-        if gallery:
-            self.gallery = np.stack(gallery)
-            self.gallery.setflags(write=False)
+        if references:
+            self.gallery, _, _ = ft.enroll_references(self.detector, self.recognizer, references)
 
     def close(self):
         self.detector = self.recognizer = None
@@ -197,7 +182,7 @@ class FaceAnalyzer:
             self.gallery = np.array([feature], dtype=np.float32, copy=True)
             self.gallery.setflags(write=False)
 
-    def analyze(self, frame: np.ndarray, timestamp: float) -> tuple[Observation | None, str]:
+    def analyze(self, frame: np.ndarray) -> tuple[Observation | None, str]:
         faces = ft.detect_faces(self.detector, frame)
         self.last_faces = faces
         if len(faces) != 1:
@@ -254,7 +239,7 @@ class CaptureGuide:
             rotation = rotation @ self.baseline.T
         return pose_from_rotation(rotation)
 
-    def check_stage(self, observation: Observation, pose: Pose) -> str:
+    def check_stage(self, pose: Pose) -> str:
         stage = self.stage
         if abs(pose.roll) > 15:
             return "Keep your head upright (avoid side tilt)"
@@ -282,7 +267,7 @@ class CaptureGuide:
             self.reset_hold()
             return rejection or "Waiting for a valid face", 0.0, None
         pose = self.relative_pose(observation)
-        reason = self.check_stage(observation, pose)
+        reason = self.check_stage(pose)
         if reason:
             self.reset_hold()
             return reason, 0.0, None
@@ -389,10 +374,9 @@ class ReferenceSession:
 
 def draw_collection_preview(frame, observation, guide, reason, progress, faces=()):
     # A separate dashboard keeps readable prompts without increasing camera resolution.
-    image = ft.letterbox(frame)[0]
+    image, transform = ft.letterbox(frame)
     dashboard = np.full((470, 640, 3), 25, dtype=np.uint8)
     dashboard[:240, 160:480] = image
-    _, transform = ft.letterbox(frame)
     boxes = [face[:4] for face in faces]
     if not boxes and observation is not None:
         boxes = [observation.bbox]
@@ -423,9 +407,7 @@ def draw_collection_preview(frame, observation, guide, reason, progress, faces=(
 
 def run_collection(folder: Path, update: bool, config: CollectionConfig, model_dir: Path,
                    source: str = "0", display: bool = True) -> bool:
-    references = []
-    if update:
-        references = sorted(path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"})
+    references = ft.collect_references(None, folder, allow_empty=True) if update else []
     analyzer = FaceAnalyzer(model_dir, config, references)
     guide = CaptureGuide(config)
     session = ReferenceSession(folder, update, config)
@@ -457,7 +439,7 @@ def run_collection(folder: Path, update: bool, config: CollectionConfig, model_d
                 outcome = "video ended before all categories were captured"
                 break
             now = time.monotonic() if is_camera else index / fps
-            observation, rejection = analyzer.analyze(frame, now)
+            observation, rejection = analyzer.analyze(frame)
             reason, progress, candidate = guide.tick(observation, frame, now, rejection)
             if reason != previous_reason:
                 print(f"{guide.stage}: {reason}", file=sys.stderr)
@@ -555,7 +537,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--prepare-only requires -u/--update NAME.")
     try:
         if args.download_models:
-            download_collection_models(args.model_dir)
+            ft.download_models(args.model_dir)
             return 0
         config = CollectionConfig(**{key: getattr(args, key) for key in CollectionConfig.__dataclass_fields__})
         config.validate()
@@ -563,11 +545,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         update = args.update is not None
         folder = resolve_destination(args.update if update else args.name, update)
         if args.prepare_only:
-            paths = ft.collect_references(None, str(folder))
+            paths = ft.collect_references(None, folder)
             ft.prepare_gallery_cache(paths, args.model_dir, augmentation, config.detection_threshold)
             return 0
         complete = run_collection(folder, update, config, args.model_dir, args.source, not args.no_display)
-        paths = sorted(path for path in folder.glob("*") if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"})
+        paths = ft.collect_references(None, folder, allow_empty=True) if folder.is_dir() else []
         if paths:
             print("Camera released. Preparing the reference gallery for fast tracking startup ...", file=sys.stderr)
             ft.prepare_gallery_cache(paths, args.model_dir, augmentation, config.detection_threshold)
