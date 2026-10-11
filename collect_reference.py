@@ -248,13 +248,13 @@ class CaptureGuide:
         if stage == "front":
             pose_ok = abs(yaw) <= limit and abs(pitch) <= limit
         elif stage == "left":
-            pose_ok = 20 <= yaw <= 35 and abs(pitch) <= 10
+            pose_ok = 20 <= yaw <= 45 and abs(pitch) <= 15
         elif stage == "right":
-            pose_ok = -35 <= yaw <= -20 and abs(pitch) <= 10
+            pose_ok = -45 <= yaw <= -20 and abs(pitch) <= 15
         elif stage == "up":
-            pose_ok = -25 <= pitch <= -8 and abs(yaw) <= 10
+            pose_ok = -25 <= pitch <= -5 and abs(yaw) <= 15
         else:  # down
-            pose_ok = 12 <= pitch <= 25 and abs(yaw) <= 10
+            pose_ok = 5 <= pitch <= 25 and abs(yaw) <= 15
         if not pose_ok:
             return "Adjust head direction to the requested pose"
         return ""
