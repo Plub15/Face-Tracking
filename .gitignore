@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+models/*.onnx
+models/*.part
+references/
+test_artifacts/
+
+references/*
+
+.vscode/
